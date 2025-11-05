@@ -3,6 +3,9 @@ import { io } from 'socket.io-client';
 import './App.css';
 
 let socket = null;
+const SOCKET_URL = process.env.REACT_APP_SOCKET_URL || 'http://localhost:5000';
+
+
 
 function App() {
   // Authentication State
@@ -45,9 +48,9 @@ function App() {
   }, []);
 
   // Initialize Socket and Setup Listeners
-  useEffect(() => {
+ useEffect(() => {
     if (isLoggedIn && !socket) {
-      socket = io('http://localhost:5000', {
+      socket = io(SOCKET_URL, {
         auth: { token },
         reconnection: true,
         reconnectionDelay: 1000,
@@ -239,7 +242,7 @@ function App() {
   };
 
   // Handle login with JWT
-  const handleLogin = async (e) => {
+const handleLogin = async (e) => {
     e.preventDefault();
     if (username.trim().length < 3) {
       alert('Username must be at least 3 characters');
@@ -247,7 +250,7 @@ function App() {
     }
 
     try {
-      const response = await fetch('http://localhost:5000/api/auth/login', {
+      const response = await fetch(`${SOCKET_URL}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: username.trim() })
