@@ -5,7 +5,7 @@ import './App.css';
 let socket = null;
 const SOCKET_URL = process.env.REACT_APP_SOCKET_URL || 'http://localhost:5000';
 
-
+console.log('Socket URL:', SOCKET_URL); // Debug log
 
 function App() {
   // Authentication State
@@ -33,6 +33,7 @@ function App() {
   const messagesEndRef = useRef(null);
   const audioRef = useRef(null);
   const fileInputRef = useRef(null);
+  const hasJoinedRoom = useRef(false);
 
   // Request notification permission
   useEffect(() => {
@@ -48,24 +49,34 @@ function App() {
   }, []);
 
   // Initialize Socket and Setup Listeners
- useEffect(() => {
+  useEffect(() => {
     if (isLoggedIn && !socket) {
+      console.log('Initializing socket connection...');
       socket = io(SOCKET_URL, {
         auth: { token },
         reconnection: true,
         reconnectionDelay: 1000,
-        reconnectionAttempts: 5
+        reconnectionAttempts: 5,
+        transports: ['websocket', 'polling']
       });
 
       // Connection events
       socket.on('connect', () => {
-        console.log('✅ Connected to server');
+        console.log('✅ Connected to server, socket ID:', socket.id);
         setIsConnected(true);
+        
+        // Join room immediately after connection
+        if (username && room && !hasJoinedRoom.current) {
+          console.log('Emitting user:join event');
+          socket.emit('user:join', { username: username.trim(), room });
+          hasJoinedRoom.current = true;
+        }
       });
 
       socket.on('disconnect', () => {
         console.log('❌ Disconnected from server');
         setIsConnected(false);
+        hasJoinedRoom.current = false;
       });
 
       socket.on('connect_error', (error) => {
@@ -75,27 +86,32 @@ function App() {
 
       // User events
       socket.on('user:joined', (data) => {
+        console.log('user:joined event received:', data);
         setUsers(data.users);
         addSystemMessage('You joined the chat');
       });
 
       socket.on('user:new', (data) => {
+        console.log('user:new event received:', data);
         setUsers(data.users);
         addSystemMessage(data.message);
         playNotificationSound();
       });
 
       socket.on('user:left', (data) => {
+        console.log('user:left event received:', data);
         setUsers(data.users);
         addSystemMessage(data.message);
       });
 
       socket.on('users:update', (updatedUsers) => {
+        console.log('users:update event received:', updatedUsers);
         setUsers(updatedUsers);
       });
 
       // Message events
       socket.on('message:receive', (data) => {
+        console.log('message:receive event received:', data);
         setMessages(prev => [...prev, { ...data, delivered: true }]);
         
         if (data.username !== username) {
@@ -156,7 +172,7 @@ function App() {
         }));
       });
 
-      // Auto read receipts - MOVED INSIDE THE IF BLOCK
+      // Auto read receipts
       socket.on('message:auto:read', ({ messageId, readBy }) => {
         setMessages(prev => prev.map(msg => {
           if (msg.id === messageId) {
@@ -167,6 +183,12 @@ function App() {
           }
           return msg;
         }));
+      });
+
+      // Error handling
+      socket.on('error', (error) => {
+        console.error('Socket error:', error);
+        alert(`Error: ${error.message}`);
       });
     }
 
@@ -186,11 +208,13 @@ function App() {
         socket.off('message:read:update');
         socket.off('message:reaction:update');
         socket.off('message:auto:read');
+        socket.off('error');
         socket.disconnect();
         socket = null;
+        hasJoinedRoom.current = false;
       }
     };
-  }, [isLoggedIn, token, username]);
+  }, [isLoggedIn, token, username, room]);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -242,7 +266,7 @@ function App() {
   };
 
   // Handle login with JWT
-const handleLogin = async (e) => {
+  const handleLogin = async (e) => {
     e.preventDefault();
     if (username.trim().length < 3) {
       alert('Username must be at least 3 characters');
@@ -250,34 +274,37 @@ const handleLogin = async (e) => {
     }
 
     try {
+      console.log('Attempting login to:', `${SOCKET_URL}/api/auth/login`);
       const response = await fetch(`${SOCKET_URL}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: username.trim() })
       });
 
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
       const data = await response.json();
+      console.log('Login response:', data);
       
       if (data.token) {
         setToken(data.token);
         setIsLoggedIn(true);
-        
-        // Join room after socket connects
-        setTimeout(() => {
-          if (socket && socket.connected) {
-            socket.emit('user:join', { username: username.trim(), room });
-          }
-        }, 100);
+      } else {
+        alert('Authentication failed. No token received.');
       }
     } catch (error) {
       console.error('Login error:', error);
-      alert('Login failed. Please try again.');
+      alert(`Login failed: ${error.message}. Check console for details.`);
     }
   };
 
   const handleSendMessage = (e) => {
     e.preventDefault();
-    if (message.trim() && socket) {
+    if (message.trim() && socket && socket.connected) {
+      console.log('Sending message:', message.trim());
+      
       const messageData = {
         message: message.trim(),
         timestamp: new Date().toISOString()
@@ -298,13 +325,15 @@ const handleLogin = async (e) => {
       if (typingTimeoutRef.current) {
         clearTimeout(typingTimeoutRef.current);
       }
+    } else {
+      console.warn('Cannot send message - socket not connected');
     }
   };
 
   const handleTyping = (e) => {
     setMessage(e.target.value);
     
-    if (!socket) return;
+    if (!socket || !socket.connected) return;
 
     socket.emit('typing:start');
     
@@ -321,14 +350,14 @@ const handleLogin = async (e) => {
     const file = e.target.files[0];
     if (file) {
       const fileMessage = `📎 Shared file: ${file.name} (${(file.size / 1024).toFixed(2)} KB)`;
-      if (socket) {
+      if (socket && socket.connected) {
         socket.emit('message:send', { message: fileMessage });
       }
     }
   };
 
   const handleReaction = (messageId, reaction) => {
-    if (socket) {
+    if (socket && socket.connected) {
       socket.emit('message:reaction', { messageId, reaction });
     }
   };
@@ -350,6 +379,7 @@ const handleLogin = async (e) => {
     setUnreadCount(0);
     setShowPrivateChat(false);
     setSelectedUser(null);
+    hasJoinedRoom.current = false;
   };
 
   const getTypingText = () => {
@@ -406,12 +436,15 @@ const handleLogin = async (e) => {
           ) : (
             <p className="notification-status">🔕 Enable notifications for best experience</p>
           )}
+          <p className="server-info" style={{ marginTop: '1rem', fontSize: '0.8rem', color: '#718096' }}>
+            Server: {SOCKET_URL}
+          </p>
         </div>
       </div>
     );
   }
 
-  // Chat Screen
+  // Chat Screen - Rest of the code remains the same...
   return (
     <div className="chat-screen">
       <audio ref={audioRef} src="data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBTGH0fPTgjMGHm7A7+OZQQ4PV6vn77BdGAg+ltryxnMpBSh+zPLaizsIGGS36+OdSA8MUKXh8bllHAU2jdXzzn0vBSV7y/DglEILElyx6OyrWBUIQ5zd8sFuJAUuhM/z1YU2Bhxqvu7mnEQODlSp5O+zYBoGPJPY88p2KwUme8rx3JA+CRZiturqpVITC0mi4PK8aB8GM4fR88yAMQYfbL/u45lCDQ5TqeXusV0bBzyS1/PMeCsFKH3M8dqLPAgZZLjq45lDDQxPpN/wr10aBjuT1/PNeCwFJ3zM8dSENAYcaL/v5pxCDQ5Uq+fvsF0aCDyS1/PKdysFKH3M8tuLOwgYZLfq5JhDDQ1Ppt/wr10ZBjuR1/PPeCwGJ3vM8daFNQYca7/u4plCDg5TqeXvs2AbBzyS1/PKdioFKH3M8tyKOwgZZLbq5ZlDDQxPpd/xsF0ZBzqS1/PLeSsFJ3vM8diFNQYdab7u5JlCDQ5UquXvsl4bBzyS1/PLdSoFKX7M8duKPQgZZLbq5JlDDQxPpd/ysV4aBjqS1/PLeSwFKHvN8dWENQYea7/u5JlCDQ5UquXvsV4bBzyT1/PKdSsFKH7N8dtKPQgZZLbq5JlDDQxPpt/xsF4ZBzqT1/PLeSwGKHvN8daENQYea7/u5JlDDQ1Tq+XwsF4bBj2S1/PJdSsFKH7N8dxKPggZY7fq5ZlDDQxPpt/xsF4ZBzqT1/PLeisFKHrN8daENQcfa7/u5JlCDw1Tq+TwsF0bBj2S1/PJdSoGKH3N8dxLPQgZY7fq5ZlDDAxPpd/xsF4ZBzqT1/PLeSwFKHrN8daENQcfa7/u45lCDw5Uq+TwsF0bBj2S1/PKdSoGJ37N8dxLPggZY7bq5ZlCDAxOpt/xsl4ZBzqT1/PLeisFKHvN8dWENQcfar/u4plCDw5Uq+TvsF0bBj2T1/PKdSoGJ37M8dtKPQcYY7bq5JlDDAxOpt/xsl4ZBzqT1vPLeSwFJ3vN8dWENQcfar/u4plCDw5Uq+TvsF0bBj2T1/PKdCoGJ37M8dtKPQcYY7bq5JlDDAxOpt/xsl4ZBzqT1vPLeSwFJ3vN8dWENQcfar/u4plCDw5Uq+TvsF0bBj2T1/PKdCoGJ37M8dtKPQcYY7bq5JlDDAxOpt/xsl4ZBzqT1vPLeSwFJ3vN8dWENQcfar/u4plCDw5Uq+TvsF0bBj2T1/PKdCoGJ37M8dtKPQcYY7bq5JlDDAxOpt/xsl4ZBzqT1vPLeSwFJ3vN8dWENQcfar/u4plCDw5Uq+TvsF0bBj2T1/PKdCoGJ37M8dtKPQcYY7bq5JlDDAxOpt/xsl4ZBzqT1vPLeSwFJ3vN8dWENQcfar/u4plCDw5Uq+TvsF0bBj2T1/PKdCoGJ37M8dtKPQcYY7bq5JlDDAxOpt/xsl4ZBzqT1vPLeSwFJ3vN8dWENQcfar/u4plCDw5Uq+TvsF0bBj2T1/PKdCoGJ37M8dtKPQcYY7bq5JlDDAxOpt/xsl4ZBzqT1vPLeSwFJ3vN8dWENQcfar/u4plCDw5Uq+TvsF0bBj2T1/PKdCoGJ37M8dtKPQcYY7bq5JlDDAxO" preload="auto"></audio>
@@ -452,29 +485,40 @@ const handleLogin = async (e) => {
         <div className="sidebar">
           <h3>Users ({users.length})</h3>
           <ul>
-            {users.map((user, i) => (
-              <li key={i} className="user-item">
-                <div className="user-info">
-                  <span className="user-dot">●</span> 
-                  <span>{user.username}</span>
-                  {user.username === username && <span className="you-badge">(You)</span>}
-                </div>
-                {user.username !== username && (
-                  <button
-                    onClick={() => handlePrivateMessage(user)}
-                    className="dm-btn"
-                    title="Send private message"
-                  >
-                    💬
-                  </button>
-                )}
+            {users.length === 0 ? (
+              <li style={{ textAlign: 'center', color: '#a0aec0', fontStyle: 'italic' }}>
+                No users online yet
               </li>
-            ))}
+            ) : (
+              users.map((user, i) => (
+                <li key={i} className="user-item">
+                  <div className="user-info">
+                    <span className="user-dot">●</span> 
+                    <span>{user.username}</span>
+                    {user.username === username && <span className="you-badge">(You)</span>}
+                  </div>
+                  {user.username !== username && (
+                    <button
+                      onClick={() => handlePrivateMessage(user)}
+                      className="dm-btn"
+                      title="Send private message"
+                    >
+                      💬
+                    </button>
+                  )}
+                </li>
+              ))
+            )}
           </ul>
         </div>
         
         <div className="chat-main">
           <div className="messages">
+            {filteredMessages.length === 0 && !searchQuery && (
+              <div className="no-messages" style={{ textAlign: 'center', padding: '2rem', color: '#a0aec0' }}>
+                <p>No messages yet. Start the conversation! 💬</p>
+              </div>
+            )}
             {filteredMessages.length === 0 && searchQuery && (
               <div className="no-results">
                 <p>No messages found for "{searchQuery}"</p>
@@ -576,8 +620,9 @@ const handleLogin = async (e) => {
               onChange={handleTyping}
               maxLength={500}
               autoComplete="off"
+              disabled={!isConnected}
             />
-            <button type="submit" disabled={!message.trim()}>
+            <button type="submit" disabled={!message.trim() || !isConnected}>
               Send
             </button>
           </form>
