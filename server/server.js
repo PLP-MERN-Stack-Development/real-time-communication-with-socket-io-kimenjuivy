@@ -17,7 +17,7 @@ const server = http.createServer(app);
 const allowedOrigins = [
     process.env.CLIENT_URL,
     'http://localhost:3000',
-    'https://real-time-communication-with-socket-io-kimenjuivy.vercel.app'
+    'https://real-time-communication-with-socket-orpin.vercel.app'
 ];
 
 // Middleware
